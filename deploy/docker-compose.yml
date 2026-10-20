@@ -1,0 +1,126 @@
+# Entorno local completo: docker compose -f deploy/docker-compose.yml up -d
+name: social-listener
+
+x-app: &app
+  build:
+    context: ..
+  image: social-listener:local
+  restart: unless-stopped
+  environment: &app-env
+    SL_ENVIRONMENT: local
+    SL_DATABASE_URL: postgresql+asyncpg://sl:sl-local@postgres:5432/sl
+    SL_PSEUDONYMIZATION_KEY: ${SL_PSEUDONYMIZATION_KEY:-clave-local-solo-para-desarrollo}
+    SL_PSEUDONYMIZATION_KEY_ID: k-local
+    SL_API_TOKEN: ${SL_API_TOKEN:-token-local}
+    SL_IDENTITY_SERVICE_URL: http://identity-stub:8081
+    SL_FIXTURE_PATH: /fixtures/menciones.jsonl
+    SL_INGEST_INTERVAL_S: "15"
+    OTEL_EXPORTER_OTLP_ENDPOINT: http://otel-collector:4318
+    OTEL_EXPORTER_OTLP_PROTOCOL: http/protobuf
+    OTEL_METRIC_EXPORT_INTERVAL: "10000"
+  volumes:
+    - ./fixtures:/fixtures:ro
+  depends_on:
+    migrate:
+      condition: service_completed_successfully
+    otel-collector:
+      condition: service_started
+
+services:
+  postgres:
+    image: postgres:17-alpine
+    environment:
+      POSTGRES_USER: sl
+      POSTGRES_PASSWORD: sl-local
+      POSTGRES_DB: sl
+    ports: ["55433:5432"]
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U sl"]
+      interval: 2s
+      retries: 30
+
+  migrate:
+    <<: *app
+    restart: "no"
+    command: ["alembic", "upgrade", "head"]
+    depends_on:
+      postgres:
+        condition: service_healthy
+
+  api:
+    <<: *app
+    command: ["social-listener", "api"]
+    ports: ["8000:8000"]
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://localhost:8000/health')"]
+      interval: 5s
+      retries: 20
+
+  ingest:
+    <<: *app
+    command: ["social-listener", "ingest"]
+
+  worker-proteccion:
+    <<: *app
+    command: ["social-listener", "worker", "--stage", "proteccion"]
+  worker-clasificacion:
+    <<: *app
+    command: ["social-listener", "worker", "--stage", "clasificacion"]
+  worker-individualizacion:
+    <<: *app
+    command: ["social-listener", "worker", "--stage", "individualizacion"]
+  worker-identidad:
+    <<: *app
+    command: ["social-listener", "worker", "--stage", "identidad"]
+  worker-identidad-reintento:
+    <<: *app
+    command: ["social-listener", "worker", "--stage", "identidad_reintento"]
+  worker-exportacion:
+    <<: *app
+    command: ["social-listener", "worker", "--stage", "exportacion"]
+  worker-retencion:
+    <<: *app
+    command: ["social-listener", "worker", "--stage", "retention"]
+
+  dispatcher:
+    <<: *app
+    command: ["social-listener", "dispatch"]
+
+  identity-stub:
+    image: social-listener:local
+    build:
+      context: ..
+    command: ["uvicorn", "stubs.identity.app:app", "--host", "0.0.0.0", "--port", "8081"]
+    environment:
+      STUB_SLOW_SECONDS: "5"
+    ports: ["8081:8081"]
+
+  ollama:
+    image: ollama/ollama:0.12.3
+    volumes:
+      - ollama:/root/.ollama
+    ports: ["11434:11434"]
+
+  ollama-pull:
+    image: ollama/ollama:0.12.3
+    restart: "no"
+    environment:
+      OLLAMA_HOST: http://ollama:11434
+    entrypoint: ["ollama", "pull", "${OLLAMA_MODEL:-qwen3:1.7b}"]
+    depends_on: [ollama]
+
+  otel-collector:
+    image: otel/opentelemetry-collector-contrib:0.120.0
+    command: ["--config=/etc/otelcol/config.yaml"]
+    volumes:
+      - ./otel-collector.yaml:/etc/otelcol/config.yaml:ro
+      - ./data:/data
+    ports: ["4317:4317", "4318:4318", "13133:13133"]
+    depends_on: [lgtm]
+
+  lgtm:
+    image: grafana/otel-lgtm:0.8.1
+    ports: ["3000:3000"]
+
+volumes:
+  ollama:

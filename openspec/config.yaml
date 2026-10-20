@@ -1,0 +1,144 @@
+schema: spec-driven
+
+context: |
+  Language: es
+  All artifacts must be written in es.
+  Keep OpenSpec structural headings and SHALL/MUST keywords in English.
+
+  ## Propósito del producto
+  Social Listener es una plataforma de escucha social (social listening) que captura
+  conversaciones públicas sobre marcas, productos, temas o personas de interés en redes
+  sociales y otros canales digitales, las transforma en datos estructurados y las entrega
+  enriquecidas a sistemas de observabilidad y análisis mediante OpenTelemetry (OTel).
+  El objetivo es que equipos de marca, servicio al cliente, riesgo reputacional y analítica
+  detecten tendencias, crisis y oportunidades con la misma inmediatez y trazabilidad con la
+  que un equipo SRE monitorea sus sistemas.
+
+  ## Capacidades principales
+  1. Ingesta: conectores pluggables por fuente (p. ej. X, Reddit, YouTube, Meta, TikTok,
+     reseñas, foros) detrás de una interfaz común. Cada conector gestiona autenticación,
+     paginación, rate limits, reintentos con backoff y checkpoints para reanudar sin
+     duplicar. Debe existir un conector simulado (mock) para desarrollo y pruebas.
+  2. Normalización: todo contenido se convierte a un modelo canónico de "Mención"
+     independiente de la fuente, con deduplicación idempotente por (fuente, id_externo).
+  3. Categorización: cada mención se clasifica por tema/categoría (taxonomía configurable
+     por cliente o proyecto), sentimiento (positivo/neutral/negativo con puntaje),
+     intención (queja, consulta, elogio, intención de compra, riesgo, spam, etc.),
+     idioma y urgencia/prioridad. Cada clasificación registra su origen (regla, modelo o
+     LLM), versión del clasificador y nivel de confianza.
+  4. Individualización: resolución y perfilado de autores y conversaciones. Se consolida
+     la identidad de un autor dentro de cada fuente, se reconstruyen hilos
+     (comentario → respuesta) y se mantiene un historial por autor (volumen, sentimiento
+     acumulado, influencia/alcance) para tratar cada voz de forma individual y no solo
+     como agregado.
+  5. Enriquecimiento: extracción de entidades (marcas, productos, lugares, personas),
+     palabras clave, resumen corto, señales de alcance (seguidores, interacciones) y
+     enlaces al contenido original.
+  6. Exportación vía OpenTelemetry: cada comentario enriquecido se emite como un
+     LogRecord OTel por OTLP (gRPC/HTTP) hacia un OpenTelemetry Collector, que lo enruta a
+     los backends que defina el cliente (p. ej. Elasticsearch/OpenSearch, Loki, Datadog,
+     Splunk, ClickHouse). Además se emiten métricas agregadas y trazas del pipeline.
+
+  ## Glosario del dominio
+  - Fuente: plataforma o canal de origen (x, reddit, youtube, facebook, instagram, ...).
+  - Mención / Comentario: unidad de contenido capturada; modelo canónico del sistema.
+  - Autor: identidad que publica una mención dentro de una fuente.
+  - Hilo / Conversación: conjunto de menciones relacionadas por respuesta o contexto.
+  - Tópico de escucha (Query): reglas que definen qué se escucha (términos, cuentas,
+    hashtags, idiomas, geografía) y a qué proyecto pertenece.
+  - Taxonomía: árbol de categorías configurable usado para clasificar.
+  - Enriquecimiento: conjunto de atributos derivados añadidos a una mención.
+
+  ## Arquitectura de referencia
+  Pipeline por etapas desacopladas mediante colas/eventos:
+  ingesta → normalización/deduplicación → categorización → individualización →
+  enriquecimiento → exportación OTel. Cada etapa es idempotente, reintentable y
+  observable de forma independiente; un fallo en una etapa no debe perder datos
+  (dead-letter queue y reprocesamiento). Persistencia propia para menciones, autores,
+  hilos, taxonomías y configuración de tópicos de escucha; la exportación OTel no
+  sustituye el almacenamiento de la plataforma.
+  Stack tecnológico: Python 3.12+ y FastAPI, PostgreSQL, SDK de OpenTelemetry para
+  Python y clasificación híbrida: reglas + modelos de lenguaje multi-proveedor
+  (Anthropic Claude, Ollama y APIs compatibles con OpenAI). Ningún componente
+  puede depender de un único proveedor o modelo.
+
+  ## Arquitectura (obligatoria)
+  Clean Architecture con puertos y adaptadores (arquitectura hexagonal):
+  - Capas: domain (entidades, value objects y políticas puras), application
+    (casos de uso y puertos de entrada/salida), adapters (entrada: API FastAPI,
+    workers/CLI; salida: persistencia, LLM, microservicio de identidad,
+    conectores de fuentes, exportación OTLP) y bootstrap (raíz de composición e
+    inyección de dependencias).
+  - Regla de dependencias: adapters → application → domain. domain no importa
+    nada externo (FastAPI, SQLAlchemy, OpenTelemetry, Anthropic, HTTPX, Pydantic
+    Settings); application solo depende de domain y de sus propios puertos.
+  - Toda integración externa se accede a través de un puerto definido en
+    application e implementado por un adaptador; los casos de uso nunca conocen
+    la tecnología concreta.
+  - Las capacidades se organizan como subpaquetes dentro de cada capa.
+  - La regla de dependencias se verifica automáticamente en CI (contratos de
+    imports); un cambio que la rompa no se integra.
+
+  ## Convenciones de OpenTelemetry
+  - Recurso: usar convenciones semánticas oficiales (service.name="social-listener",
+    service.version, deployment.environment.name).
+  - Atributos de dominio bajo el namespace propio "social.*", por ejemplo:
+    social.source, social.mention.id, social.mention.url, social.mention.lang,
+    social.mention.created_at, social.author.id, social.author.handle,
+    social.thread.id, social.category, social.sentiment.label,
+    social.sentiment.score, social.intent, social.priority, social.entities,
+    social.classifier.name, social.classifier.version, social.classifier.confidence,
+    social.listening_query.id, social.project.id.
+  - Logs: un LogRecord por mención enriquecida; body = texto del comentario; severidad
+    derivable de la prioridad/riesgo; correlacionado con trace_id/span_id del pipeline.
+  - Métricas: contadores e histogramas (menciones por fuente/categoría/sentimiento,
+    latencia por etapa, errores, rate limits). Prohibido usar atributos de alta
+    cardinalidad (ids de autor o mención, texto) como dimensiones de métricas.
+  - Trazas: un span por etapa del pipeline por mención o lote.
+  - El esquema de atributos se versiona; cambios incompatibles requieren propuesta
+    explícita y notas de migración para los consumidores.
+
+  ## Requisitos no funcionales
+  - Privacidad y cumplimiento: solo contenido público y conforme a los términos de uso
+    de cada plataforma. Cumplimiento de la Ley 1581 de 2012 (Habeas Data, Colombia) y
+    principios equivalentes de GDPR: minimización de datos, retención configurable,
+    derecho de supresión y opción de seudonimizar/hashear identificadores de autor
+    antes de exportar.
+  - Seguridad: credenciales de las fuentes en un gestor de secretos, nunca en código ni
+    en logs; cifrado en tránsito (TLS) hacia el Collector.
+  - Escalabilidad: diseño para alto volumen y picos (crisis reputacionales) con
+    backpressure y escalamiento horizontal por etapa.
+  - Confiabilidad: entrega al menos una vez con deduplicación aguas abajo; ninguna
+    mención aceptada se pierde silenciosamente.
+  - Multi-tenant: aislamiento de datos y configuración por cliente/proyecto.
+  - Calidad: pruebas automatizadas por etapa, conectores probados contra fixtures
+    grabados, y evaluación periódica de precisión de los clasificadores.
+
+  ## Fuera de alcance (salvo propuesta explícita)
+  - Publicar o responder en redes sociales en nombre del cliente.
+  - Recolección de contenido privado o que viole los términos de las plataformas.
+  - Construir dashboards propios: la visualización se delega a los backends que
+    reciben los datos vía OTel.
+
+# Per-artifact rules (optional)
+rules:
+  specs:
+    - Las specs describen comportamiento observable; no mencionan capas, puertos ni adaptadores
+  design:
+    - Cada integración externa nueva MUST declarar su puerto (en application) y su adaptador (en adapters)
+    - Ninguna decisión puede introducir dependencias de domain hacia frameworks o infraestructura
+  tasks:
+    - Separar en cada grupo el caso de uso (probado con puertos falsos), el adaptador (con su prueba de integración) y el cableado en bootstrap
+    - Los casos de uso MUST probarse sin base de datos, red ni SDKs externos
+
+# Per-operation guidance (optional)
+# Add advisory guidance for how apply and archive work should be conducted.
+# This is separate from artifact rules above.
+# Example:
+#   operations:
+#     apply:
+#       guidance:
+#         - Keep test summaries concise
+#     archive:
+#       guidance:
+#         - Summarize the archive outcome before finishing

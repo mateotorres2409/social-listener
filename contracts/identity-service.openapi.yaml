@@ -1,0 +1,108 @@
+openapi: 3.1.0
+info:
+  title: Microservicio de identidad (contrato esperado por Social Listener)
+  version: 1.0.0
+  description: |
+    Indica si un autor de redes sociales corresponde a un cliente de la entidad.
+
+    Minimización de datos: la solicitud solo lleva canal, id externo y username; la
+    respuesta solo devuelve el estado, una referencia opaca del cliente y una confianza.
+    Nunca nombres, documentos ni productos. Social Listener ignora cualquier campo
+    adicional que llegue en la respuesta.
+servers:
+  - url: https://identidad.interno.example
+security:
+  - oauth2: [identity.lookup]
+  - mtls: []
+paths:
+  /v1/identity/lookups:
+    post:
+      operationId: lookupIdentity
+      summary: Busca si un autor corresponde a un cliente
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/LookupRequest"
+            example:
+              channel: x
+              external_author_id: "123"
+              username: juanp
+      responses:
+        "200":
+          description: Resultado de la búsqueda
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/LookupResponse"
+              examples:
+                identificado:
+                  value: {status: match, customer_ref: "c-7f3a9e", confidence: 0.94}
+                no_identificado:
+                  value: {status: no_match, customer_ref: null, confidence: 0.0}
+                ambiguo:
+                  value: {status: ambiguous, customer_ref: null, confidence: 0.5}
+        "400":
+          description: Solicitud inválida
+          content:
+            application/json:
+              schema: {$ref: "#/components/schemas/Error"}
+        "401":
+          description: Credenciales inválidas
+        "429":
+          description: Límite de tasa; Social Listener reintenta con backoff
+        "503":
+          description: Servicio no disponible; Social Listener marca la identidad como pendiente
+  /health:
+    get:
+      operationId: health
+      security: []
+      responses:
+        "200":
+          description: El servicio está disponible
+components:
+  securitySchemes:
+    oauth2:
+      type: oauth2
+      flows:
+        clientCredentials:
+          tokenUrl: https://identidad.interno.example/oauth/token
+          scopes:
+            identity.lookup: Consultar identidades
+    mtls:
+      type: mutualTLS
+  schemas:
+    LookupRequest:
+      type: object
+      additionalProperties: false
+      required: [channel, external_author_id, username]
+      properties:
+        channel:
+          type: string
+          description: Canal de origen (x, facebook, instagram, tiktok, youtube, reddit, resenas)
+          minLength: 1
+        external_author_id:
+          type: string
+          minLength: 1
+        username:
+          type: string
+          minLength: 1
+    LookupResponse:
+      type: object
+      required: [status, customer_ref, confidence]
+      properties:
+        status:
+          type: string
+          enum: [match, no_match, ambiguous]
+        customer_ref:
+          description: Referencia opaca del cliente; solo presente con status=match
+          type: [string, "null"]
+        confidence:
+          type: number
+          minimum: 0
+          maximum: 1
+    Error:
+      type: object
+      properties:
+        detail: {type: string}

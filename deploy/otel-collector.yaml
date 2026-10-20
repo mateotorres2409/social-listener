@@ -1,0 +1,40 @@
+# Collector local: recibe OTLP de la plataforma y lo reenvía a grafana/otel-lgtm.
+# El exportador "file" deja una copia de los logs para las pruebas e2e.
+receivers:
+  otlp:
+    protocols:
+      grpc:
+        endpoint: 0.0.0.0:4317
+      http:
+        endpoint: 0.0.0.0:4318
+
+processors:
+  batch: {}
+
+exporters:
+  debug:
+    verbosity: basic
+  otlphttp/lgtm:
+    endpoint: http://lgtm:4318
+  file/e2e:
+    path: /data/logs.jsonl
+
+extensions:
+  health_check:
+    endpoint: 0.0.0.0:13133
+
+service:
+  extensions: [health_check]
+  pipelines:
+    logs:
+      receivers: [otlp]
+      processors: [batch]
+      exporters: [debug, otlphttp/lgtm, file/e2e]
+    traces:
+      receivers: [otlp]
+      processors: [batch]
+      exporters: [debug, otlphttp/lgtm]
+    metrics:
+      receivers: [otlp]
+      processors: [batch]
+      exporters: [debug, otlphttp/lgtm]
